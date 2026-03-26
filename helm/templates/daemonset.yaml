@@ -1,12 +1,11 @@
-{{- if eq .Values.mode "kubelet" }}
+{{- if eq .Values.mode "cgroup" }}
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
   name: {{ include "eager-oom-killer.fullname" . }}
   labels:
     {{- include "eager-oom-killer.labels" . | nindent 4 }}
 spec:
-  replicas: 1
   selector:
     matchLabels:
       {{- include "eager-oom-killer.selectorLabels" . | nindent 6 }}
@@ -20,11 +19,25 @@ spec:
         - name: eager-oom-killer
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["-interval", "{{ .Values.interval }}"]
+          args: ["-mode", "cgroup", "-interval", "{{ .Values.interval }}", "-cgroup-root", "{{ .Values.cgroupRoot }}"]
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: cgroup
+              mountPath: {{ .Values.cgroupRoot }}
+              readOnly: true
           {{- with .Values.resources }}
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+      volumes:
+        - name: cgroup
+          hostPath:
+            path: /sys/fs/cgroup
+            type: Directory
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

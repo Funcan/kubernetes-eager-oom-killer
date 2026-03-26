@@ -33,9 +33,17 @@ func intervalDefault() time.Duration {
 func main() {
 	var interval time.Duration
 	var kubeconfig string
+	var mode string
+	var cgroupRoot string
 	flag.DurationVar(&interval, "interval", intervalDefault(), "polling interval (e.g. 30s, 2m); also settable via INTERVAL env var")
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "path to kubeconfig (uses in-cluster config if empty)")
+	flag.StringVar(&mode, "mode", "kubelet", "data source mode: 'kubelet' (proxy via API server) or 'cgroup' (read cgroup v2 files directly)")
+	flag.StringVar(&cgroupRoot, "cgroup-root", "/sys/fs/cgroup", "cgroup v2 filesystem root (only used in cgroup mode)")
 	flag.Parse()
+
+	if mode != "kubelet" && mode != "cgroup" {
+		log.Fatalf("Invalid mode %q: must be 'kubelet' or 'cgroup'", mode)
+	}
 
 	config, err := buildConfig(kubeconfig)
 	if err != nil {
@@ -50,10 +58,22 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	log.Printf("Starting eager-oom-killer with interval %s", interval)
+	var check func()
+	switch mode {
+	case "kubelet":
+		log.Printf("Starting eager-oom-killer (kubelet mode) with interval %s", interval)
+		check = func() { runCheck(ctx, clientset, config) }
+	case "cgroup":
+		nodeName := os.Getenv("NODE_NAME")
+		if nodeName == "" {
+			log.Fatal("NODE_NAME environment variable is required in cgroup mode")
+		}
+		log.Printf("Starting eager-oom-killer (cgroup mode) on node %s with interval %s", nodeName, interval)
+		check = func() { runCgroupCheck(ctx, clientset, cgroupRoot, nodeName) }
+	}
 
 	// Run immediately on startup, then on ticker
-	runCheck(ctx, clientset, config)
+	check()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -64,7 +84,7 @@ func main() {
 			log.Println("Shutting down")
 			return
 		case <-ticker.C:
-			runCheck(ctx, clientset, config)
+			check()
 		}
 	}
 }
@@ -92,6 +112,69 @@ func runCheck(ctx context.Context, clientset kubernetes.Interface, config *rest.
 	for _, node := range nodes.Items {
 		if err := checkNode(ctx, clientset, config, node.Name); err != nil {
 			log.Printf("Error checking node %s: %v", node.Name, err)
+		}
+	}
+}
+
+// runCgroupCheck reads cgroup v2 files directly and kills pods over their memory limit.
+func runCgroupCheck(ctx context.Context, clientset kubernetes.Interface, cgroupRoot, nodeName string) {
+	entries, err := scanCgroups(cgroupRoot)
+	if err != nil {
+		log.Printf("Error scanning cgroups: %v", err)
+		return
+	}
+	if len(entries) == 0 {
+		return
+	}
+
+	pods, err := clientset.CoreV1().Pods("").List(ctx, metav1.ListOptions{
+		FieldSelector: "spec.nodeName=" + nodeName,
+	})
+	if err != nil {
+		log.Printf("Error listing pods on node %s: %v", nodeName, err)
+		return
+	}
+
+	// Build lookup maps: pod UID → pod, and container ID → container name
+	type containerInfo struct {
+		pod           *corev1.Pod
+		containerName string
+	}
+	containerByID := make(map[string]containerInfo)
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		for _, cs := range pod.Status.ContainerStatuses {
+			// ContainerID format: "containerd://<id>" or "cri-o://<id>"
+			id := cs.ContainerID
+			if idx := strings.Index(id, "://"); idx != -1 {
+				id = id[idx+3:]
+			}
+			if id != "" {
+				containerByID[id] = containerInfo{pod: pod, containerName: cs.Name}
+			}
+		}
+	}
+
+	for _, entry := range entries {
+		if entry.memMax <= 0 {
+			continue // no limit or "max"
+		}
+		if entry.memCurrent <= entry.memMax {
+			continue
+		}
+
+		info, ok := containerByID[entry.containerID]
+		if !ok {
+			continue
+		}
+
+		log.Printf("Container %s/%s/%s using %s, limit %s — killing pod",
+			info.pod.Namespace, info.pod.Name, info.containerName,
+			resource.NewQuantity(entry.memCurrent, resource.BinarySI).String(),
+			resource.NewQuantity(entry.memMax, resource.BinarySI).String())
+
+		if err := killPod(ctx, clientset, info.pod, info.containerName, entry.memCurrent, entry.memMax); err != nil {
+			log.Printf("Error killing pod %s/%s: %v", info.pod.Namespace, info.pod.Name, err)
 		}
 	}
 }
