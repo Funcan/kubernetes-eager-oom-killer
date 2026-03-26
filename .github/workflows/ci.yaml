@@ -50,3 +50,26 @@ jobs:
           go-version-file: go.mod
 
       - run: go build -o kubernetes-eager-oom-killer .
+
+  helm-validate:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        mode: [kubelet, cgroup]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+          sudo mv kubeconform /usr/local/bin/
+
+      - name: Render and validate (${{ matrix.mode }} mode)
+        run: |
+          helm template test-release ./helm --set mode=${{ matrix.mode }} > rendered.yaml
+          echo "--- Rendered manifests (${{ matrix.mode }} mode) ---"
+          cat rendered.yaml
+          echo "--- Validating ---"
+          kubeconform -strict -summary rendered.yaml
