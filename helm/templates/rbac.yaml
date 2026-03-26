@@ -1,0 +1,34 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "eager-oom-killer.fullname" . }}
+  labels:
+    {{- include "eager-oom-killer.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "eager-oom-killer.fullname" . }}
+  labels:
+    {{- include "eager-oom-killer.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "eager-oom-killer.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "eager-oom-killer.fullname" . }}
+    namespace: {{ .Release.Namespace }}

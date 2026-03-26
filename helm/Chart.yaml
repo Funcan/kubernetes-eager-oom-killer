@@ -1,0 +1,6 @@
+apiVersion: v2
+name: eager-oom-killer
+description: Preemptively kills Kubernetes pods with containers over their memory limit
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
