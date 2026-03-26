@@ -3,7 +3,14 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
+# Mode: "kubelet" runs as a Deployment polling kubelet metrics via the API server.
+#        "cgroup" runs as a DaemonSet reading cgroup v2 files directly from the host.
+mode: kubelet
+
 interval: 1m
+
+# cgroup v2 filesystem mount path (only used in cgroup mode)
+cgroupRoot: /sys/fs/cgroup
 
 resources: {}
 
